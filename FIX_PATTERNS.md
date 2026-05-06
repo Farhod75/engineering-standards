@@ -1,4 +1,4 @@
-# FIX_PATTERNS.md
+﻿# FIX_PATTERNS.md
 # Real bug fixes from production — extracted from HadithVerifier + Idris App
 # Author: Farhod Elbekov | github.com/Farhod75
 # Aligned with: QA_STANDARDS.md (hadith-verifier repo)
@@ -458,13 +458,301 @@ async function save(key: string, val: unknown) {
 ```
 
 ---
+## FP-018 | Onboarding | Age grid missing age 1
+Symptom: Youngest children (age 1) cannot be registered
+Fix: Array.from({length:12}, (_,i) => i+1) not i+2
+
+
+##FP-019 | YouTube | Channel @handle URLs return 404
+Symptom: YouTube page says "This page isn't available"
+Fix: Use search URLs instead:
+  youtube.com/results?search_query=ms+rachel+for+toddlers
+Applies to: Any app linking to YouTube channels
+
+
+## FP-020 through FP-026 — Reserved (applied inline, not yet documented)
+
+---
+
+## FP-027 — Video reward plays same clip on every visit
+**Source:** Idris App — video-reward.html
+**Symptom:** Same YouTube video plays every time reward screen opens.
+**Root cause:** `Math.random()` happened to return similar values, and there was no exclusion logic.
+
+**Fix:**
+```javascript
+let _lastVideoIdx = -1;
+function pickNextVideo() {
+  let idx;
+  do { idx = Math.floor(Math.random() * VIDEOS.length); }
+  while (VIDEOS.length > 1 && idx === _lastVideoIdx);
+  _lastVideoIdx = idx;
+  return VIDEOS[idx];
+}
+```
+**Applies to:** Any rotating reward/playlist system. `do-while` prevents same-index repeat.
+
+---
+
+## FP-028 — Reward timer tiers wrong (5/30 min flat → 5 proper tiers)
+**Source:** Idris App — video-reward.html
+**Symptom:** Old tiers (5 tasks=2min, 30 tasks=30min) didn't match educational session pacing.
+**Root cause:** Initial implementation used 2-tier logic; requirement was 5 tiers + daily_complete flag.
+
+**Fix:**
+```javascript
+function getTier(tasks, dailyComplete) {
+  if (dailyComplete)  return { seconds: 30 * 60, label: '30 min video', emoji: '🏆' };
+  if (tasks >= 20)    return { seconds:  5 * 60, label:  '5 min video', emoji: '🥇' };
+  if (tasks >= 15)    return { seconds:  2 * 60, label:  '2 min video', emoji: '🌟' };
+  if (tasks >= 10)    return { seconds:      60, label:  '1 min video', emoji: '👍' };
+  return                     { seconds:      30, label: '30 sec video', emoji: '✅' };
+}
+// URL: video-reward.html?tasks=10 or ?daily=1
+```
+**Applies to:** Idris App reward system. 5 tasks=30s, 10=1min, 15=2min, 20=5min, daily_complete=30min.
+
+---
+
+## FP-029 — "Back" button on reward page navigates wrong (history.back() fails)
+**Source:** Idris App — video-reward.html
+**Symptom:** Back button sometimes navigates to Google/external page, or does nothing when no history.
+**Root cause:** `history.back()` goes to whatever was before in browser history — not guaranteed to be index.html.
+
+**Fix:**
+```javascript
+function goBack() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  if (ytPlayer && playerReady) ytPlayer.stopVideo();
+  window.location.href = '/index.html';
+}
+```
+**Rule:** NEVER use `history.back()` for structured app navigation. Always use explicit `window.location.href`.
+
+---
+
+## FP-030 — TTS speaks emoji characters aloud ("grinning face", "star" etc.)
+**Source:** Idris App — index.html, idris-voice-module.html
+**Symptom:** `speak("Amazing! 🌟")` → TTS says "Amazing! star" or "Amazing! grinning face".
+**Root cause:** SpeechSynthesisUtterance receives emoji Unicode — some TTS engines verbalize the name.
+
+**Fix:**
+```javascript
+// index.html — add before speak()
+function stripForTTS(t) {
+  return t.replace(/\p{Emoji}/gu, '')
+          .replace(/\b(star|dizzy|sparkle|fire|heart|check|cross|arrow)\b/gi, '')
+          .replace(/\s+/g, ' ').trim();
+}
+// Then: new SpeechSynthesisUtterance(stripForTTS(text))
+
+// idris-voice-module.html — inside speakText()
+const cleaned = text.replace(/\p{Emoji}/gu, '').replace(/\s+/g, ' ').trim();
+const utt = new SpeechSynthesisUtterance(cleaned);
+```
+**Note:** Requires Unicode property escapes (`/\p{Emoji}/gu`) — supported in Safari 12+ and Chrome 64+.
+
+---
+
+## FP-031 — Cartoon button opens YouTube in new tab (external navigation)
+**Source:** Idris App — index.html
+**Symptom:** Tapping cartoon button leaves the PWA and opens youtube.com. Child gets lost.
+**Root cause:** `window.open(url, '_blank')` with a youtube.com URL — external site, not in-app.
+
+**Fix:**
+```javascript
+// WRONG:
+function openCartoon() { if (S.currentCartoon?.url) window.open(S.currentCartoon.url, '_blank'); }
+
+// CORRECT — route to in-app video reward screen:
+function openCartoon() {
+  window.location.href = 'video-reward.html?tasks=' + S.totalStars + '&stars=' + S.totalStars;
+}
+```
+**Rule:** NEVER `window.open()` to external domains in a child-facing PWA. Use in-app embed only.
+
+---
+
+## FP-032 — Language selector shows 7 languages but only 4 have translations
+**Source:** Idris App — index.html
+**Symptom:** Switching to Arabic/Spanish/French crashes app with `Cannot read property of undefined`.
+**Root cause:** `LANG_LIST` had 7 entries but `LANGS_CFG` only had 4 (en, ru, uz, tg). `L()` returns undefined.
+
+**Fix:** Add complete entries for `ar`, `es`, `fr` to `LANGS_CFG` with all required keys:
+`flag, short, name, dir, ob_name, ob_tag, ob_next, s1..s4 strings, diags[], nav[], words[], challenges[], activities[], interests[], aac_cats[], celebrate[], fam_members[], fam_emojis[]`
+
+For Arabic: `dir:"rtl"` — also triggers CSS `[dir=rtl]` rules for right-to-left layout.
+**Rule:** Every code in `LANG_LIST` MUST have a matching entry in `LANGS_CFG`. Add both atomically.
+
+---
+
+## FP-033 — Uzbek TTS speaks in English (no uz-UZ voice on iOS)
+**Source:** Idris App — index.html
+**Symptom:** Uzbek mode TTS falls back to default (usually English) voice. Words sound wrong.
+**Root cause:** iOS does not ship a `uz-UZ` TTS voice. `speechSynthesis.getVoices()` returns no Uzbek match.
+
+**Fix:**
+```javascript
+let m = vs.find(v => v.lang.startsWith(utt.lang.split('-')[0]));
+if (!m && utt.lang === 'uz-UZ') m = vs.find(v => v.lang.startsWith('tr')); // Turkish ≈ closest
+if (m) utt.voice = m;
+```
+**Why Turkish:** Uzbek and Turkish are both Turkic languages with similar phonology. `tr-TR` is available on all iOS devices. Better than English for Uzbek families.
+
+---
+
+## FP-034 — iPhone Safari mic denied silently in PWA after first launch
+**Source:** Idris App — index.html (`startSpeak2`), idris-voice-module.html (`startListening`) — also see FP-011
+**Symptom:** `SpeechRecognition.start()` fires, `onstart` never fires, no error shown.
+**Root cause:** PWA context on iPhone has separate mic permission from Safari browser. Must call `getUserMedia` explicitly each time to trigger the permission dialog.
+
+**Complete fix — 4 rules:**
+
+1. **`new SR()` must be created INSIDE getUserMedia `.then()`** — not before. On iOS, the audio session isn't active until getUserMedia resolves.
+2. **500ms delay required** between stream stop and `recognition.start()` — iOS needs time to hand off the audio session.
+3. **Browser-aware error messages** — Chrome and Safari show different UI for granting permissions.
+4. **Extract `doStart()` helper** — avoids duplicating recognition setup in the else branch.
+
+```javascript
+function startMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { /* show unsupported message */ return; }
+
+  function doStart() {
+    const recognition = new SR();
+    recognition.lang = 'en-US'; // set per language
+    recognition.onresult = () => { /* handle result */ };
+    recognition.onerror = () => { /* reset UI */ };
+    recognition.onend = () => { /* reset UI */ };
+    recognition.start();
+  }
+
+  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        stream.getTracks().forEach(t => t.stop()); // release — ASR manages its own stream
+        setTimeout(doStart, 500); // 500ms required on iOS for audio session handoff
+      })
+      .catch(() => {
+        // Browser-specific instructions — cannot open Settings programmatically
+        const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg|OPR/.test(navigator.userAgent);
+        const msg = isChrome
+          ? '🔒 Click the lock icon in the address bar → Allow microphone'
+          : '⚙️ Settings → Safari → Microphone → Allow';
+        resultEl.textContent = msg;
+      });
+  } else {
+    doStart(); // desktop fallback — no getUserMedia needed
+  }
+}
+```
+
+**Mic test waveform pattern** (verify mic before using ASR):
+```javascript
+navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const analyser = audioCtx.createAnalyser();
+  audioCtx.createMediaStreamSource(stream).connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  function draw() {
+    requestAnimationFrame(draw);
+    analyser.getByteTimeDomainData(data);
+    // draw waveform on canvas
+  }
+  draw();
+  // stopTest: stream.getTracks().forEach(t => t.stop())
+});
+```
+
+**Rule:** Always call `getUserMedia` before `SpeechRecognition.start()` in iOS PWAs. Create `new SR()` INSIDE the `.then()` callback. Use 500ms delay. Show browser-specific permission instructions on `.catch()`.
+
+---
+
+## FP-035 — Speak game shows word but doesn't read it aloud
+**Source:** Idris App — index.html
+**Symptom:** Word appears on screen but no TTS audio. Child must already know the word to attempt it.
+**Root cause:** `loadSpeakWord()` only sets DOM text. `speak()` was never called.
+
+**Fix:**
+```javascript
+function loadSpeakWord() {
+  const w = L().words[S.speakIdx % L().words.length];
+  document.getElementById('speak-emoji').textContent = w.e;
+  document.getElementById('speak-word').textContent = w.w;
+  document.getElementById('speak-result').textContent = '';
+  document.getElementById('micBtn').classList.remove('listening');
+  speak(w.w); // ← read word aloud when it loads
+}
+// In speak(): utt.rate = 0.7 (slower than default 1.0 — better for ASD children learning words)
+```
+**UX rationale:** ASD children benefit from audio + visual pairing. Word should be modeled before child attempts to repeat it. Rate 0.7 gives clear, unhurried pronunciation.
+
+---
 
 ## STATS
 | Source | Count | Most critical |
 |--------|-------|--------------|
 | HadithVerifier (real) | 6 | FP-001 RLS, FP-002 ENV |
 | Shared | 3 | FP-007 empty content, FP-008 JSON fences |
-| Idris App | 8 | FP-011 PWA mic, FP-015 profile injection |
-| **Total** | **17** | |
+| Idris App | 17 | FP-011 PWA mic, FP-034 iPhone mic, FP-030 TTS emoji |
+| **Total** | **26** | |
 
-Last updated: 2026-05-01 | Next review: after Idris App Phase 2
+Last updated: 2026-05-02 | Next review: after Idris App Phase 2
+
+---
+
+## FP-036 — GitHub Actions failing: missing pytest files
+**Date:** 2026-05-03
+**Symptom:** All 10+ workflow runs red. test-ai job crashes on missing tests/pytest/requirements.txt
+**Root cause:** deploy.yml referenced test_ai_audit.py and requirements.txt that were never created
+**Fix:** Removed test-ai job from deploy.yml entirely. Simplified to single deploy job only.
+**Prevention:** Never reference files in CI that don't exist. Create files BEFORE adding to workflow.
+**Verified:** Unblocked deployment pipeline
+
+---
+
+## FP-037 — package.json missing in HTML PWA project
+**Date:** 2026-05-03
+**Symptom:** npm run test:orchestrator gives ENOENT package.json
+**Root cause:** Project started as pure HTML PWA. Tests added later but npm never initialized.
+**Fix:** npm init -y then npm install devDependencies
+**Prevention:** Always run npm init at project start even for HTML-only projects
+**Verified:** npm scripts now work correctly
+
+---
+
+## FP-038 — BOM in package.json breaks Vercel build
+**Date:** 2026-05-03
+**Symptom:** Vercel build: Cannot parse json - Unexpected token before first brace
+**Root cause:** PowerShell Out-File writes UTF-8 WITH BOM. Vercel JSON parser rejects BOM.
+**Fix:** $utf8NoBom = New-Object System.Text.UTF8Encoding $false then WriteAllText
+**Prevention:** Always verify first byte = 123. Add .gitattributes with *.json text eol=lf
+**Verified:** GitHub Actions run 14 - first green deployment
+
+---
+
+## FP-039 — Match game cards full viewport height on desktop
+**Date:** 2026-05-03
+**Symptom:** .match-card stretches to 400px on desktop. Content appears at bottom corner.
+**Root cause:** aspect-ratio:1 plus grid-template-columns:1fr on wide desktop = very tall cards
+**Fix:** .match-grid max-width 360px margin auto. .match-card max-width and max-height 110px
+**Prevention:** Test match game on desktop. Playwright check card height less than 200px
+**Status:** Fix pending - apply to index.html next session
+---
+
+## FP-042 — [System.IO.File] ignores PowerShell working directory
+- **Symptom**: `Could not find path 'C:\Users\Farhod\tests\...'` even after `cd C:\QA\Idris\...`
+- **Root cause**: `[System.IO.File]::ReadAllText("relative\path")` resolves from the .NET process
+  working directory (`C:\Users\Farhod`), NOT from PowerShell's current location
+- **Fix**: Always use absolute paths with `$BASE = "C:\QA\Idris\idris-learning-app"` prefix
+- **Rule**: NEVER use relative paths with `[System.IO.File]` — always `"$BASE\path\to\file"`
+- **Also affects**: `[System.IO.File]::WriteAllText`, `[System.IO.File]::ReadAllBytes`
+- **Safe alternatives**: `Get-Content "relative"` and `Set-Content "relative"` DO respect `cd`
+- **Prevention**: Add `$BASE = $PWD.Path` at top of every PowerShell script that uses System.IO.File
+## FP-043 — PowerShell inline if/else fails when pasted line-by-line
+- **Symptom**: `else : The term 'else' is not recognized`
+- **Root cause**: PowerShell interactive mode treats each line as a separate command.
+  When `if {...}` completes, the next line `else {...}` is a new command — not recognized
+- **Fix**: Always paste full if/else blocks at once, OR use a .ps1 script file
+- **Rule**: Multi-line if/else must be pasted as ONE block in interactive PowerShell
+- **Prevention**: Put all logic in .ps1 files, run with `.\script.ps1` — never paste line by line
